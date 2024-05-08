@@ -15,8 +15,8 @@ void gen_rand_data(T *data, int n)
 }
 
 
-template <typename T>
-__global__ void gemm_simple(T *Cptr, const T *Aptr, const T *Bptr, int m, int n, int k) {
+template <typename T,int kTileM,int kTileN,int ktileK,typename TiledMMA>
+__global__ void gemm_simple_cute(T *Cptr, const T *Aptr, const T *Bptr, int m, int n, int k) {
 
     //进行定义一个大的tensor 这个tensor的主要目的是为了后续的分块放入全局内存。
     Tensor A = make_tensor(make_gmem_ptr(Aptr), make_shape(m, k), make_stride(k, Int<1>{}));
@@ -58,6 +58,66 @@ __global__ void gemm_simple(T *Cptr, const T *Aptr, const T *Bptr, int m, int n,
 
 }
 
+
+template <typename T,int kTileM,int kTileN,int ktileK >
+__global__ void gemm_simple(T *Cptr, const T *Aptr, const T *Bptr, int m, int n, int k) {
+
+  int tx = threadIdx.x;
+  int bx = blockIdx.x;
+  int by = blockIdx.y;
+
+
+  int A_offset = (blockIdx.x * k * kTileM);
+  int B_offset = (blockIdx.y * k * kTileN);
+
+  extren__shared__float sram[];
+
+  float* tile_A=sram;
+  float* tile_B=&sram[kTileM * k];
+  float* tile_C=&sram[kTileM * k + kTileN * k];
+
+
+  for(int x=0;x<k;x++){
+    tile_A[(tx*k)+x] = A[A_offset + (tx * k) + x];
+    tile_B[(tx*k)+x] = B[B_offset + (tx * k) + x];
+  }
+
+  __syncthreads();
+
+  #pragma unroll
+  for(int i=0;i<kTileN;i++){
+    float sum =0;
+     for(int j=0;j<k;j++){
+      sum += tile_A[(tx*k)+j] * tile_B[(i * k)+j];
+     }
+     tile_C[(tx * kTileN) + i]=sum;
+  }
+
+  __syncthreads();
+
+}
+
+
+template<typename T,int kTileM,int kTileN,int ktileK>
+__global__ void gemm_simple(T *Cptr, const T *Aptr, const T *Bptr, int m, int n, int k) {
+
+
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 int main(){
   srand(1000);
 
@@ -96,10 +156,8 @@ auto MMA = decltype(make_tiled_mma(mma_atom{},
                       make_layout(Shape<_2, _2, _1>{}), 
                       make_layout(Shape<_1, _2, _1>{})));
 
-dim3 block(size(MMA{}));
-dim3 grid(n / kTileN, m / kTileM);
 
-PRINT("mma",size(MMA{}));
+  PRINT("mma",size(MMA{}));
 
   constexpr int kTileM = 128;
   constexpr int kTileN = 128;
@@ -113,7 +171,24 @@ PRINT("mma",size(MMA{}));
   cudaEventRecord(start);
   for (int i = 0; i < count; ++i)
   {
-    gemm_simple<T, kTileM, kTileN, kTileK, MMA><<<grid, block>>>(Cptr, Aptr, Bptr, m, n, k);
+    gemm_simple_cute<T, kTileM, kTileN, kTileK, MMA><<<grid, block>>>(Cptr, Aptr, Bptr, m, n, k);
+  }
+  auto err = cudaGetLastError();
+  printf("err = %d, str = %s\n", err, cudaGetErrorString(err));
+  cudaEventRecord(end);
+  cudaEventSynchronize(end);
+  cudaEventElapsedTime(&elapsedTime, start, end);
+  std::cout << "gemm-simple-cute took " << elapsedTime / count << "ms." << std::endl;
+
+
+  dim3 grid(n / kTileN, m / kTileM);
+  dim3 block(kTileM);
+  //const int sram
+  int count = 100;
+  cudaEventRecord(start);
+  for (int i = 0; i < count; ++i)
+  {
+    gemm_simple<T, kTileM, kTileN, kTileK><<<grid, block>>>(Cptr, Aptr, Bptr, m, n, k);
   }
   auto err = cudaGetLastError();
   printf("err = %d, str = %s\n", err, cudaGetErrorString(err));
@@ -121,6 +196,5 @@ PRINT("mma",size(MMA{}));
   cudaEventSynchronize(end);
   cudaEventElapsedTime(&elapsedTime, start, end);
   std::cout << "gemm-simple took " << elapsedTime / count << "ms." << std::endl;
-
 
 }
